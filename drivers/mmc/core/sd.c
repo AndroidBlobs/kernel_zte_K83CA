@@ -1210,6 +1210,8 @@ static void mmc_sd_detect(struct mmc_host *host)
 		goto out;
 	}
 
+	mmc_power_up(host, host->ocr_avail);
+
 	/*
 	 * Just check if our card has been removed.
 	 */
@@ -1359,6 +1361,7 @@ static int _mmc_sd_resume(struct mmc_host *host)
 	if (err) {
 		pr_err("%s: %s: fail to resume clock scaling (%d)\n",
 			mmc_hostname(host), __func__, err);
+		mmc_power_off(host);
 		goto out;
 	}
 
