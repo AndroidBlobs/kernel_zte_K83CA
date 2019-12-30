@@ -78,6 +78,7 @@
 #include <uapi/linux/android/binder.h>
 #include "binder_alloc.h"
 #include "binder_trace.h"
+#include <stdbool.h>
 
 static HLIST_HEAD(binder_deferred_list);
 static DEFINE_MUTEX(binder_deferred_lock);
@@ -122,6 +123,10 @@ BINDER_DEBUG_ENTRY(proc);
 #define FORBIDDEN_MMAP_FLAGS                (VM_WRITE)
 
 #define BINDER_SMALL_BUF_SIZE (PAGE_SIZE * 64)
+
+#ifndef ZTE_FEATURE_CGROUP_FREEZER
+#define ZTE_FEATURE_CGROUP_FREEZER               false
+#endif
 
 enum {
 	BINDER_DEBUG_USER_ERROR             = 1U << 0,
@@ -2822,8 +2827,24 @@ static bool binder_proc_transaction(struct binder_transaction *t,
 		binder_transaction_priority(thread->task, t, node_prio,
 					    node->inherit_rt);
 		binder_enqueue_thread_work_ilocked(thread, &t->work);
+/* ZSW_ADD FOR CPUFREEZER begin */
+#if ZTE_FEATURE_CGROUP_FREEZER == true
+		set_task_unfreezable(thread->task);
+		if (thread->task->flags & PF_FROZEN) {
+			__thaw_task(thread->task);
+		}
+#endif
+/* ZSW_ADD FOR CPUFREEZER end */
 	} else if (!pending_async) {
 		binder_enqueue_work_ilocked(&t->work, &proc->todo);
+/* ZSW_ADD FOR CPUFREEZER begin */
+#if ZTE_FEATURE_CGROUP_FREEZER == true
+		set_task_unfreezable(proc->tsk);
+		if (proc->tsk->flags & PF_FROZEN) {
+			__thaw_task(proc->tsk);
+		}
+#endif
+/* ZSW_ADD FOR CPUFREEZER end */
 	} else {
 		binder_enqueue_work_ilocked(&t->work, &node->async_todo);
 	}
@@ -2946,6 +2967,7 @@ static void binder_transaction(struct binder_proc *proc,
 		target_thread = binder_get_txn_from_and_acq_inner(in_reply_to);
 		if (target_thread == NULL) {
 			return_error = BR_DEAD_REPLY;
+			return_error_param = -EPROTO;
 			return_error_line = __LINE__;
 			goto err_dead_binder;
 		}
@@ -3141,7 +3163,6 @@ static void binder_transaction(struct binder_proc *proc,
 		t->buffer = NULL;
 		goto err_binder_alloc_buf_failed;
 	}
-	t->buffer->allow_user_free = 0;
 	t->buffer->debug_id = t->debug_id;
 	t->buffer->transaction = t;
 	t->buffer->target_node = target_node;
@@ -3637,14 +3658,18 @@ static int binder_thread_write(struct binder_proc *proc,
 
 			buffer = binder_alloc_prepare_to_free(&proc->alloc,
 							      data_ptr);
-			if (buffer == NULL) {
-				binder_user_error("%d:%d BC_FREE_BUFFER u%016llx no match\n",
-					proc->pid, thread->pid, (u64)data_ptr);
-				break;
-			}
-			if (!buffer->allow_user_free) {
-				binder_user_error("%d:%d BC_FREE_BUFFER u%016llx matched unreturned buffer\n",
-					proc->pid, thread->pid, (u64)data_ptr);
+			if (IS_ERR_OR_NULL(buffer)) {
+				if (PTR_ERR(buffer) == -EPERM) {
+					binder_user_error(
+						"%d:%d BC_FREE_BUFFER u%016llx matched unreturned or currently freeing buffer\n",
+						proc->pid, thread->pid,
+						(u64)data_ptr);
+				} else {
+					binder_user_error(
+						"%d:%d BC_FREE_BUFFER u%016llx no match\n",
+						proc->pid, thread->pid,
+						(u64)data_ptr);
+				}
 				break;
 			}
 			binder_debug(BINDER_DEBUG_FREE_BUFFER,
